@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-const API_BASE = 'http://localhost:8080/api/auth';
+const API_BASE = 'https://whackiest-25.onrender.com/api/auth';
 
 interface User {
   id: string;
