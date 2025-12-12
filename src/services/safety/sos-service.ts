@@ -44,7 +44,7 @@ export async function sendSOSAlert(payload: SOSAlertPayload): Promise<boolean> {
   console.log('[SOS] Sending alert for', payload.memberName, 'to', payload.recipients.length, 'recipients');
 
   try {
-    const response = await fetch('http://localhost:8080/api/sos/alert', {
+    const response = await fetch('https://whackiest-25.onrender.com/api/sos/alert', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
