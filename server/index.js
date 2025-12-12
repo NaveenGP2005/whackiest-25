@@ -25,24 +25,24 @@ app.use(
   })
 );
 
-// Session configuration with MongoDB
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "wanderforge_secret_key_2024",
     resave: false,
     saveUninitialized: false,
     store: MongoStore.create({
-      mongoUrl: process.env.MONGO_URI || "mongodb://localhost:27017/wanderforge",
-      ttl: 24 * 60 * 60, // 1 day
+      mongoUrl: process.env.MONGO_URI,
+      ttl: 24 * 60 * 60,
     }),
     cookie: {
-      secure: process.env.NODE_ENV === "production",
+      secure: true,       // 🔥 FORCE TRUE on Render
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000, // 1 day
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      sameSite: "none",   // 🔥 REQUIRED for cross-origin
+      maxAge: 24 * 60 * 60 * 1000,
     },
   })
 );
+
 
 // Routes
 app.use("/api/auth", userRouter);
