@@ -10,6 +10,7 @@ interface RegionInputProps {
   isLoading: boolean;
   onChange: (value: string) => void;
   onSelectSuggestion: (suggestion: RegionSuggestion) => void;
+  onEnterPress?: () => void;
 }
 
 export function RegionInput({
@@ -18,6 +19,7 @@ export function RegionInput({
   isLoading,
   onChange,
   onSelectSuggestion,
+  onEnterPress,
 }: RegionInputProps) {
   const [isFocused, setIsFocused] = useState(false);
   const [debounceTimer, setDebounceTimer] = useState<NodeJS.Timeout | null>(null);
@@ -74,6 +76,12 @@ export function RegionInput({
           value={value}
           onChange={handleChange}
           onFocus={() => setIsFocused(true)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && value && value.length >= 3 && !showDropdown) {
+              e.preventDefault();
+              onEnterPress?.();
+            }
+          }}
           placeholder="Enter destination (e.g., Goa, Hampi, Jaipur)"
           className="w-full pl-12 pr-12 py-3 bg-dark-800 border border-dark-700 rounded-xl
                      text-white placeholder-dark-500 focus:border-primary-500 focus:ring-1

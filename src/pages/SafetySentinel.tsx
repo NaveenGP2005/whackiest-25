@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
@@ -17,6 +17,9 @@ import {
   Share2,
   Users,
   LogOut,
+  Loader2,
+  MapPinOff,
+  RefreshCw,
 } from 'lucide-react';
 import Button from '../components/ui/Button';
 import {
@@ -32,7 +35,6 @@ import {
 import { useSafetyStore } from '../stores/safety.store';
 import { useTripSafetyContext } from '../hooks/useTripSafetyContext';
 import {
-  generateDemoMembers,
   startLiveMapSimulation,
   type DemoMember,
 } from '../services/safety/demo-simulator';
@@ -41,7 +43,6 @@ import {
   scheduleReminder,
   cancelReminder,
   acknowledgeCheckIn,
-  getReminderState,
   setReminderCallback,
 } from '../services/safety/sms-service';
 import {
@@ -54,8 +55,7 @@ import {
   stopLocationBroadcast,
   leaveGroup,
 } from '../services/safety/realtime-tracker';
-import type { RealtimeMember } from '../services/safety/realtime-tracker';
-import { startContinuousTracking, stopTracking } from '../services/safety/location-tracker';
+import { startContinuousTracking, requestLocationPermission, isGeolocationSupported } from '../services/safety/location-tracker';
 import { isSupabaseConfigured } from '../lib/supabase';
 
 interface TeamMember {
@@ -148,34 +148,6 @@ const initialAlerts: Alert[] = [
   },
 ];
 
-// Convert radar members to map format
-function membersToMapFormat(members: TeamMember[]): Array<{
-  id: string;
-  name: string;
-  avatar: string;
-  location: { lat: number; lng: number };
-  status: 'safe' | 'warning' | 'danger';
-  accuracy: number;
-  battery: number;
-  lastSeen: string;
-  isMoving: boolean;
-}> {
-  return members.map((m) => ({
-    id: m.id,
-    name: m.name,
-    avatar: m.avatar,
-    location: {
-      lat: HAMPI_CENTER.lat + m.distance * 0.005 * Math.sin((m.angle * Math.PI) / 180),
-      lng: HAMPI_CENTER.lng + m.distance * 0.005 * Math.cos((m.angle * Math.PI) / 180),
-    },
-    status: m.status,
-    accuracy: 15,
-    battery: m.battery,
-    lastSeen: m.lastSeen,
-    isMoving: m.isMoving,
-  }));
-}
-
 export default function SafetySentinel() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -192,10 +164,8 @@ export default function SafetySentinel() {
   const {
     viewMode,
     setViewMode,
-    isSetupComplete,
     myPhoneNumber,
     myName,
-    emergencyContacts,
     setPhoneNumber,
     setMyName,
     addEmergencyContact,
@@ -222,6 +192,11 @@ export default function SafetySentinel() {
   const [showGroupSetupModal, setShowGroupSetupModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [initialJoinCode, setInitialJoinCode] = useState<string | null>(null);
+
+  // GPS Status tracking
+  const [gpsStatus, setGpsStatus] = useState<'idle' | 'acquiring' | 'active' | 'denied' | 'error'>('idle');
+  const [gpsError, setGpsError] = useState<string | null>(null);
+  const [lastGpsUpdate, setLastGpsUpdate] = useState<Date | null>(null);
 
   // Map members for LiveMapView
   const [mapMembers, setMapMembers] = useState<DemoMember[]>([]);
@@ -251,6 +226,8 @@ export default function SafetySentinel() {
   // Handle live tracking session
   useEffect(() => {
     if (viewMode === 'live' && groupId && myMemberId && groupCode && groupName) {
+      console.log('[SafetySentinel] Starting live tracking session...');
+
       // Start the realtime session
       startRealtimeSession(
         groupId,
@@ -258,10 +235,12 @@ export default function SafetySentinel() {
         groupCode,
         groupName,
         (members) => {
+          console.log('[SafetySentinel] Members updated:', members.length);
           setLiveMembers(members);
         },
         // Callback when a new member joins
         (newMember) => {
+          console.log('[SafetySentinel] New member joined:', newMember.name);
           setAlerts((prev) => [
             {
               id: `join-${newMember.id}-${Date.now()}`,
@@ -277,16 +256,55 @@ export default function SafetySentinel() {
         }
       );
 
-      // Start GPS tracking and broadcast
-      const gpsCleanup = startContinuousTracking((fix) => {
-        updateLocationFix(fix);
-      });
+      // Check GPS support and permissions first
+      if (!isGeolocationSupported()) {
+        setGpsStatus('error');
+        setGpsError('Geolocation is not supported by your browser');
+        return;
+      }
+
+      // Start GPS tracking
+      setGpsStatus('acquiring');
+      setGpsError(null);
+      console.log('[SafetySentinel] Starting GPS tracking...');
+
+      const gpsCleanup = startContinuousTracking(
+        (fix) => {
+          console.log('[SafetySentinel] GPS fix received:', fix.lat.toFixed(6), fix.lng.toFixed(6), 'accuracy:', fix.accuracy_m);
+          setGpsStatus('active');
+          setLastGpsUpdate(new Date());
+          updateLocationFix(fix);
+        },
+        {
+          onError: (error) => {
+            console.error('[SafetySentinel] GPS error:', error);
+            if (error.includes('denied')) {
+              setGpsStatus('denied');
+            } else {
+              setGpsStatus('error');
+            }
+            setGpsError(error);
+          }
+        }
+      );
+
       startLocationBroadcast();
 
+      // Set timeout to detect GPS failure
+      const gpsTimeout = setTimeout(() => {
+        if (gpsStatus === 'acquiring') {
+          console.warn('[SafetySentinel] GPS acquisition timeout');
+          // Don't set error yet, GPS might still be trying
+        }
+      }, 15000);
+
       return () => {
+        console.log('[SafetySentinel] Cleaning up live tracking...');
+        clearTimeout(gpsTimeout);
         gpsCleanup();
         stopLocationBroadcast();
         stopRealtimeSession();
+        setGpsStatus('idle');
       };
     }
   }, [viewMode, groupId, myMemberId, groupCode, groupName, setLiveMembers]);
@@ -434,32 +452,41 @@ export default function SafetySentinel() {
 
   // Live tracking handlers
   const handleCreateGroup = async (name: string, userName: string) => {
+    console.log('[SafetySentinel] Creating group:', name, 'user:', userName);
     const result = await createGroup(name, userName);
     if (result) {
+      console.log('[SafetySentinel] Group created successfully:', result.groupCode);
       setGroupSession({
         groupId: result.groupId,
         groupCode: result.groupCode,
         groupName: name,
         myMemberId: result.memberId,
       });
+    } else {
+      console.error('[SafetySentinel] Failed to create group');
     }
     return result;
   };
 
   const handleJoinGroup = async (code: string, userName: string) => {
+    console.log('[SafetySentinel] Joining group:', code, 'user:', userName);
     const result = await joinGroup(code, userName);
     if (result) {
+      console.log('[SafetySentinel] Joined group successfully:', result.groupName);
       setGroupSession({
         groupId: result.groupId,
         groupCode: code,
         groupName: result.groupName,
         myMemberId: result.memberId,
       });
+    } else {
+      console.error('[SafetySentinel] Failed to join group');
     }
     return result;
   };
 
   const handleLiveSessionSuccess = () => {
+    console.log('[SafetySentinel] Live session success - switching to live view');
     setViewMode('live');
   };
 
@@ -518,9 +545,6 @@ export default function SafetySentinel() {
     if (diffMin < 60) return `${diffMin} min ago`;
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
-
-  // Get members for current view
-  const displayMembers = viewMode === 'map' ? mapMembers : members;
 
   return (
     <div className="min-h-screen bg-dark-900">
@@ -796,9 +820,73 @@ export default function SafetySentinel() {
                   itineraryPlaces={tripContext.hasActiveTrip ? tripContext.places : []}
                   showItineraryRoute={tripContext.hasActiveTrip}
                 />
+
+                {/* GPS Status Indicator */}
+                <div className="absolute top-4 right-4 z-[1000]">
+                  {gpsStatus === 'acquiring' && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="flex items-center gap-2 bg-amber-500/20 text-amber-400 px-3 py-2 rounded-lg backdrop-blur-sm border border-amber-500/30"
+                    >
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span className="text-sm font-medium">Acquiring GPS...</span>
+                    </motion.div>
+                  )}
+                  {gpsStatus === 'active' && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="flex items-center gap-2 bg-emerald-500/20 text-emerald-400 px-3 py-2 rounded-lg backdrop-blur-sm border border-emerald-500/30"
+                    >
+                      <MapPin className="w-4 h-4" />
+                      <span className="text-sm font-medium">GPS Active</span>
+                      {lastGpsUpdate && (
+                        <span className="text-xs text-emerald-400/70">
+                          {Math.floor((Date.now() - lastGpsUpdate.getTime()) / 1000)}s ago
+                        </span>
+                      )}
+                    </motion.div>
+                  )}
+                  {(gpsStatus === 'denied' || gpsStatus === 'error') && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="flex flex-col gap-2 bg-red-500/20 text-red-400 px-3 py-2 rounded-lg backdrop-blur-sm border border-red-500/30"
+                    >
+                      <div className="flex items-center gap-2">
+                        <MapPinOff className="w-4 h-4" />
+                        <span className="text-sm font-medium">
+                          {gpsStatus === 'denied' ? 'Location Denied' : 'GPS Error'}
+                        </span>
+                      </div>
+                      {gpsError && (
+                        <span className="text-xs text-red-400/70">{gpsError}</span>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={async () => {
+                          setGpsStatus('acquiring');
+                          setGpsError(null);
+                          const granted = await requestLocationPermission();
+                          if (!granted) {
+                            setGpsStatus('denied');
+                            setGpsError('Please enable location in browser settings');
+                          }
+                        }}
+                        className="text-red-400 hover:text-red-300 text-xs"
+                      >
+                        <RefreshCw className="w-3 h-3 mr-1" />
+                        Retry
+                      </Button>
+                    </motion.div>
+                  )}
+                </div>
+
                 {/* Show count of members without GPS */}
                 {liveMembers.filter((m) => m.location === null).length > 0 && (
-                  <div className="absolute bottom-4 left-4 bg-dark-800/90 backdrop-blur px-3 py-2 rounded-lg text-sm">
+                  <div className="absolute bottom-4 left-4 bg-dark-800/90 backdrop-blur px-3 py-2 rounded-lg text-sm z-[1000]">
                     <span className="text-amber-400">
                       {liveMembers.filter((m) => m.location === null).length} member(s) waiting for GPS...
                     </span>

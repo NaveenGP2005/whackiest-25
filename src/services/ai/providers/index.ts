@@ -1,14 +1,15 @@
 // LLM Provider Manager with Fallback Chain
-// Primary: OpenRouter (Grok) | Fallback: Groq, Offline
+// Primary: Gemini | Fallback: OpenRouter, Groq, Offline
 import type { LLMProviderName, LLMPrompt, LLMResponse, ProviderHealth, ChatExtractionResult } from '../types';
+import { GeminiProvider } from './gemini-provider';
 import { GroqProvider } from './groq-provider';
 import { OpenRouterProvider } from './openrouter-provider';
 import { OfflineProvider } from './offline-provider';
 import { getAIServiceConfig } from '../utils/env-config';
 
-// Fallback order: OpenRouter (Grok) → Groq → Offline
-// Using Grok via OpenRouter as primary LLM
-const FALLBACK_ORDER: LLMProviderName[] = ['openrouter', 'groq', 'offline'];
+// Fallback order: Gemini → OpenRouter → Groq → Offline
+// Using Gemini as primary LLM (free tier available)
+const FALLBACK_ORDER: LLMProviderName[] = ['gemini', 'openrouter', 'groq', 'offline'];
 
 interface Provider {
   name: LLMProviderName;
@@ -33,7 +34,19 @@ export class LLMProviderManager {
   private initializeProviders(): void {
     const config = getAIServiceConfig();
 
-    // Initialize OpenRouter (Grok) - PRIMARY PROVIDER
+    // Initialize Gemini - PRIMARY PROVIDER (free tier available)
+    if (config.gemini.apiKey) {
+      this.providers.set('gemini', new GeminiProvider(config.gemini.apiKey));
+      this.healthStatus.set('gemini', {
+        name: 'gemini',
+        available: true,
+        lastChecked: new Date(),
+        consecutiveFailures: 0,
+      });
+      console.log('[LLM] Gemini initialized as primary provider');
+    }
+
+    // Initialize OpenRouter as first fallback
     if (config.openrouter.apiKey) {
       this.providers.set('openrouter', new OpenRouterProvider(config.openrouter.apiKey));
       this.healthStatus.set('openrouter', {
@@ -42,10 +55,10 @@ export class LLMProviderManager {
         lastChecked: new Date(),
         consecutiveFailures: 0,
       });
-      console.log('[LLM] OpenRouter (Grok) initialized as primary provider');
+      console.log('[LLM] OpenRouter initialized as fallback provider');
     }
 
-    // Initialize Groq as fallback
+    // Initialize Groq as second fallback
     if (config.groq.apiKey) {
       this.providers.set('groq', new GroqProvider(config.groq.apiKey));
       this.healthStatus.set('groq', {
@@ -157,6 +170,7 @@ export class LLMProviderManager {
 }
 
 // Export providers
+export { GeminiProvider } from './gemini-provider';
 export { GroqProvider } from './groq-provider';
 export { OpenRouterProvider } from './openrouter-provider';
 export { OfflineProvider } from './offline-provider';

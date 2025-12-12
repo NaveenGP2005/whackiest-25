@@ -164,42 +164,65 @@ function fuseSamples(samples: LocationFix[]): LocationFix {
 /**
  * Start continuous location tracking
  * @param callback Called with each new location fix
+ * @param onError Optional error callback
  * @returns Cleanup function to stop tracking
  */
 export function startContinuousTracking(
   callback: (fix: LocationFix) => void,
-  options: { enableHighAccuracy?: boolean } = {}
+  options: { enableHighAccuracy?: boolean; onError?: (error: string) => void } = {}
 ): () => void {
   if (!isGeolocationSupported()) {
-    console.error('Geolocation not supported');
+    console.error('[LocationTracker] Geolocation not supported');
+    options.onError?.('Geolocation not supported in this browser');
     return () => {};
   }
 
   // Stop any existing tracking
   stopTracking();
 
+  console.log('[LocationTracker] Starting continuous tracking with high accuracy:', options.enableHighAccuracy ?? true);
+
   const geoOptions: PositionOptions = {
     enableHighAccuracy: options.enableHighAccuracy ?? true,
     maximumAge: 0,
-    timeout: 10000,
+    timeout: 15000, // Increased timeout for slower devices
   };
+
+  let fixCount = 0;
 
   watchId = navigator.geolocation.watchPosition(
     (pos) => {
-      callback({
+      fixCount++;
+      const fix: LocationFix = {
         lat: pos.coords.latitude,
         lng: pos.coords.longitude,
         accuracy_m: pos.coords.accuracy || 100,
         timestamp: Date.now(),
         source: pos.coords.accuracy && pos.coords.accuracy < 50 ? 'gps' : 'network',
-      });
+      };
+      console.log(`[LocationTracker] Fix #${fixCount}: ${fix.lat.toFixed(6)}, ${fix.lng.toFixed(6)} (accuracy: ${fix.accuracy_m.toFixed(0)}m, source: ${fix.source})`);
+      callback(fix);
     },
     (err) => {
-      console.error('Location tracking error:', err.message);
+      console.error('[LocationTracker] Error:', err.code, err.message);
+      let errorMessage = 'Location error';
+      switch (err.code) {
+        case err.PERMISSION_DENIED:
+          errorMessage = 'Location permission denied. Please enable location access in browser settings.';
+          break;
+        case err.POSITION_UNAVAILABLE:
+          errorMessage = 'Location unavailable. Make sure GPS/Location is enabled on your device.';
+          break;
+        case err.TIMEOUT:
+          errorMessage = 'Location request timed out. Please try again or move to a better location.';
+          break;
+      }
+      options.onError?.(errorMessage);
     },
     geoOptions
   );
 
+  console.log('[LocationTracker] Watch started with ID:', watchId);
   return () => stopTracking();
 }
 

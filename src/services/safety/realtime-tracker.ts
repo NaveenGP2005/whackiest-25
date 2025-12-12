@@ -273,8 +273,10 @@ export async function startRealtimeSession(
   onMembersUpdate: (members: RealtimeMember[]) => void,
   onMemberJoin?: (member: RealtimeMember) => void
 ): Promise<boolean> {
+  console.log('[RealtimeTracker] Starting session for group:', groupCode, 'member:', memberId);
+
   if (!isSupabaseConfigured() || !supabase) {
-    console.error('Supabase not configured');
+    console.error('[RealtimeTracker] Supabase not configured!');
     return false;
   }
 
@@ -291,13 +293,19 @@ export async function startRealtimeSession(
 
   try {
     // Load existing members
-    const { data: members } = await supabase
+    console.log('[RealtimeTracker] Loading existing members for group:', groupId);
+    const { data: members, error: membersError } = await supabase
       .from('members')
       .select()
       .eq('group_id', groupId)
       .eq('is_active', true);
 
+    if (membersError) {
+      console.error('[RealtimeTracker] Error loading members:', membersError);
+    }
+
     if (members) {
+      console.log('[RealtimeTracker] Found', members.length, 'existing members');
       for (const m of members) {
         currentSession.members.set(m.id, {
           id: m.id,
@@ -316,13 +324,19 @@ export async function startRealtimeSession(
     }
 
     // Load latest locations for each member
-    const { data: locations } = await supabase
+    console.log('[RealtimeTracker] Loading latest locations...');
+    const { data: locations, error: locError } = await supabase
       .from('locations')
       .select()
       .eq('group_id', groupId)
       .order('timestamp', { ascending: false });
 
+    if (locError) {
+      console.error('[RealtimeTracker] Error loading locations:', locError);
+    }
+
     if (locations) {
+      console.log('[RealtimeTracker] Found', locations.length, 'location records');
       // Get only the latest location per member
       const latestByMember = new Map<string, DbLocation>();
       for (const loc of locations) {
@@ -331,6 +345,7 @@ export async function startRealtimeSession(
         }
       }
 
+      console.log('[RealtimeTracker] Latest locations for', latestByMember.size, 'members');
       for (const [memId, loc] of latestByMember) {
         const member = currentSession.members.get(memId);
         if (member) {
@@ -341,11 +356,13 @@ export async function startRealtimeSession(
           member.isMoving = loc.is_moving;
           member.lastSeen = new Date(loc.timestamp);
           updateMemberStatus(member);
+          console.log('[RealtimeTracker] Loaded location for', member.name, ':', loc.lat.toFixed(6), loc.lng.toFixed(6));
         }
       }
     }
 
     // Subscribe to new location updates
+    console.log('[RealtimeTracker] Setting up location subscription...');
     locationChannel = supabase
       .channel(`locations:${groupId}`)
       .on(
@@ -357,13 +374,17 @@ export async function startRealtimeSession(
           filter: `group_id=eq.${groupId}`,
         },
         (payload) => {
+          console.log('[RealtimeTracker] Location update received:', payload.new);
           const loc = payload.new as DbLocation;
           handleLocationUpdate(loc);
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log('[RealtimeTracker] Location channel status:', status);
+      });
 
     // Subscribe to member changes (join/leave)
+    console.log('[RealtimeTracker] Setting up member subscription...');
     memberChannel = supabase
       .channel(`members:${groupId}`)
       .on(
@@ -375,6 +396,7 @@ export async function startRealtimeSession(
           filter: `group_id=eq.${groupId}`,
         },
         (payload) => {
+          console.log('[RealtimeTracker] Member change received:', payload.eventType, payload.new);
           if (payload.eventType === 'INSERT') {
             const m = payload.new as DbMember;
             handleMemberJoin(m);
@@ -386,7 +408,9 @@ export async function startRealtimeSession(
           }
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log('[RealtimeTracker] Member channel status:', status);
+      });
 
     // Initial callback with current members
     emitMembersUpdate();
@@ -469,8 +493,15 @@ export function stopLocationBroadcast(): void {
  */
 async function broadcastMyLocation(): Promise<void> {
   if (!currentSession || !lastLocationFix || !isSupabaseConfigured() || !supabase) {
+    if (!currentSession) console.log('[RealtimeTracker] No session for broadcast');
+    if (!lastLocationFix) console.log('[RealtimeTracker] No location fix for broadcast');
     return;
   }
+
+  const battery = await getBatteryLevel();
+  const signal = getSignalStrength(lastLocationFix.accuracy_m);
+
+  console.log('[RealtimeTracker] Broadcasting location:', lastLocationFix.lat.toFixed(6), lastLocationFix.lng.toFixed(6), 'battery:', battery, 'signal:', signal);
 
   try {
     const { error } = await supabase.from('locations').insert({
@@ -479,16 +510,18 @@ async function broadcastMyLocation(): Promise<void> {
       lat: lastLocationFix.lat,
       lng: lastLocationFix.lng,
       accuracy_m: Math.round(lastLocationFix.accuracy_m),
-      battery_percent: await getBatteryLevel(),
-      signal_strength: getSignalStrength(lastLocationFix.accuracy_m),
+      battery_percent: battery,
+      signal_strength: signal,
       is_moving: lastLocationFix.accuracy_m < 20, // Moving if high accuracy
     });
 
     if (error) {
-      console.error('Failed to broadcast location:', error);
+      console.error('[RealtimeTracker] Failed to broadcast location:', error);
+    } else {
+      console.log('[RealtimeTracker] Location broadcast successful');
     }
   } catch (error) {
-    console.error('Error broadcasting location:', error);
+    console.error('[RealtimeTracker] Error broadcasting location:', error);
   }
 }
 
