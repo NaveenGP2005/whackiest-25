@@ -6,6 +6,7 @@ import SignalCleanse from './pages/SignalCleanse';
 import SafetySentinel from './pages/SafetySentinel';
 import ElasticItinerary from './pages/ElasticItinerary';
 import CinematicMemories from './pages/CinematicMemories';
+import TripPlanner from './pages/TripPlanner';
 
 function App() {
   return (
@@ -18,6 +19,7 @@ function App() {
           <Route path="/safety" element={<SafetySentinel />} />
           <Route path="/itinerary" element={<ElasticItinerary />} />
           <Route path="/memories" element={<CinematicMemories />} />
+          <Route path="/trip-planner" element={<TripPlanner />} />
         </Routes>
       </AnimatePresence>
     </Router>

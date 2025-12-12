@@ -5,7 +5,7 @@ import type { PlaceKnowledge } from './place-research.types';
 import { mapToPlaceCategory } from './time-optimizer';
 import { haversineDistance, calculateCentroid } from './route-optimizer';
 import { searchPlace } from './web-search';
-import { searchNominatim } from '../ai/search/nominatim.service';
+import { searchPlace as geocodePlace } from '../ai/search/nominatim.service';
 
 // Required categories for a complete trip
 const REQUIRED_CATEGORIES: PlaceCategory[] = [
@@ -128,16 +128,13 @@ export async function searchRecommendationsForCategory(
       const placeName = extractPlaceName(result.title, result.snippet);
       if (!placeName) continue;
 
-      // Try to get coordinates
+      // Try to get coordinates using Photon fallback
       let coords: Coords = { lat: centroid.lat + 0.01, lng: centroid.lng + 0.01 }; // Fallback near centroid
 
       try {
-        const geoResult = await searchNominatim(`${placeName}, ${region}`);
-        if (geoResult && geoResult.lat && geoResult.lon) {
-          coords = {
-            lat: parseFloat(geoResult.lat),
-            lng: parseFloat(geoResult.lon),
-          };
+        const geoResult = await geocodePlace(`${placeName}, ${region}`);
+        if (geoResult.places.length > 0 && geoResult.places[0].coordinates) {
+          coords = geoResult.places[0].coordinates;
         }
       } catch {
         // Use fallback coordinates

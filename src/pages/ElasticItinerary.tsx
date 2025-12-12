@@ -22,6 +22,7 @@ import {
   DollarSign,
   Loader2,
   Navigation,
+  Shield,
 } from 'lucide-react';
 import Button from '../components/ui/Button';
 import { useItineraryStore } from '../stores/itinerary.store';
@@ -275,6 +276,15 @@ export default function ElasticItinerary() {
               >
                 <Map className="w-4 h-4 mr-2" />
                 {showMap ? 'Hide Map' : 'Show Map'}
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => navigate('/safety')}
+                className="bg-emerald-600 hover:bg-emerald-500"
+              >
+                <Shield className="w-4 h-4 mr-2" />
+                Activate Safety
               </Button>
               <Button variant="secondary" size="sm" onClick={() => navigate('/signal-cleanse')}>
                 <Zap className="w-4 h-4 mr-2" />

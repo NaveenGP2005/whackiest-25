@@ -11,7 +11,7 @@ import type {
 } from './place-research.types';
 import type { PlaceCategory, Coords } from './types';
 import { searchPlace, searchNearbyFood } from './web-search';
-import { searchNominatim, type NominatimSearchResult } from '../ai/search/nominatim.service';
+import { searchPlace as geocodePlace } from '../ai/search/nominatim.service';
 import { LLMProviderManager } from '../ai/providers';
 import { haversineDistance } from './route-optimizer';
 
@@ -177,22 +177,20 @@ async function getPlaceCoordinates(
   }
 
   try {
-    // Try with full query first
-    let searchResult = await searchNominatim(`${placeName}, ${region}`);
-    if (searchResult && searchResult.lat && searchResult.lon) {
-      return {
-        lat: parseFloat(searchResult.lat),
-        lng: parseFloat(searchResult.lon),
-      };
+    // Use geocodePlace which has Photon → Nominatim fallback (avoids CORS issues)
+    const result = await geocodePlace(`${placeName}, ${region}`);
+    if (result.places.length > 0 && result.places[0].coordinates) {
+      const coords = result.places[0].coordinates;
+      console.log(`[PlaceResearch] Geocoded ${placeName} via ${result.source}: ${coords.lat}, ${coords.lng}`);
+      return coords;
     }
 
     // Try with just the place name if region search failed
-    searchResult = await searchNominatim(placeName);
-    if (searchResult && searchResult.lat && searchResult.lon) {
-      return {
-        lat: parseFloat(searchResult.lat),
-        lng: parseFloat(searchResult.lon),
-      };
+    const fallbackResult = await geocodePlace(placeName);
+    if (fallbackResult.places.length > 0 && fallbackResult.places[0].coordinates) {
+      const coords = fallbackResult.places[0].coordinates;
+      console.log(`[PlaceResearch] Geocoded ${placeName} (no region) via ${fallbackResult.source}: ${coords.lat}, ${coords.lng}`);
+      return coords;
     }
   } catch (error) {
     console.warn(`[PlaceResearch] Geocoding failed for ${placeName}:`, error);
@@ -223,12 +221,9 @@ async function findNearbyRestaurants(
   // First, try to geocode restaurants mentioned in search results
   for (const name of extractedNames.slice(0, 3)) {
     try {
-      const searchResult = await searchNominatim(`${name}, ${region}`);
-      if (searchResult && searchResult.lat && searchResult.lon) {
-        const coords = {
-          lat: parseFloat(searchResult.lat),
-          lng: parseFloat(searchResult.lon),
-        };
+      const geoResult = await geocodePlace(`${name}, ${region}`);
+      if (geoResult.places.length > 0 && geoResult.places[0].coordinates) {
+        const coords = geoResult.places[0].coordinates;
         const distance = haversineDistance(
           placeCoords.lat,
           placeCoords.lng,

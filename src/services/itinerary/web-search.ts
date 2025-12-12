@@ -1,16 +1,32 @@
 // Web Search Service for Place Research
-// Uses DuckDuckGo API with CORS proxy, falls back to LLM knowledge
+// Uses multiple search APIs with fallback to LLM knowledge
+// NO CORS proxy dependencies - all APIs support direct browser access
 
 import type { WebSearchResult, PlaceSearchResults } from './place-research.types';
 import { LLMProviderManager } from '../ai/providers';
+import { retryWithBackoff } from '../ai/utils/retry-utils';
 
-// CORS proxy for browser-based requests
-const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
-const DUCKDUCKGO_API = 'https://api.duckduckgo.com/';
-
-// Rate limiting
+// Rate limiting configuration
 let lastSearchTime = 0;
-const SEARCH_DELAY_MS = 1000; // 1 second between searches
+const SEARCH_DELAY_MS = 500; // 500ms between searches
+
+// Results cache with TTL
+interface CacheEntry {
+  results: PlaceSearchResults;
+  timestamp: number;
+}
+
+const searchCache = new Map<string, CacheEntry>();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+// Retry configuration for search APIs
+const SEARCH_RETRY_CONFIG = {
+  maxRetries: 2,
+  initialDelayMs: 500,
+  maxDelayMs: 5000,
+  backoffFactor: 2,
+  jitterMs: 200,
+};
 
 /**
  * Wait to respect rate limits
@@ -25,91 +41,43 @@ async function waitForRateLimit(): Promise<void> {
 }
 
 /**
- * Search DuckDuckGo Instant Answer API
- * Returns structured results about a place
+ * Get cached search results if valid
  */
-async function searchDuckDuckGo(query: string): Promise<WebSearchResult[]> {
-  await waitForRateLimit();
+function getCachedResults(query: string): PlaceSearchResults | null {
+  const entry = searchCache.get(query.toLowerCase());
+  if (!entry) return null;
 
-  const encodedQuery = encodeURIComponent(query);
-  const apiUrl = `${DUCKDUCKGO_API}?q=${encodedQuery}&format=json&no_html=1&skip_disambig=1`;
-  const proxyUrl = `${CORS_PROXY}${encodeURIComponent(apiUrl)}`;
+  if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
+    searchCache.delete(query.toLowerCase());
+    return null;
+  }
 
-  try {
-    const response = await fetch(proxyUrl, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
-    });
+  return entry.results;
+}
 
-    if (!response.ok) {
-      throw new Error(`DuckDuckGo API error: ${response.status}`);
+/**
+ * Cache search results
+ */
+function cacheResults(query: string, results: PlaceSearchResults): void {
+  searchCache.set(query.toLowerCase(), {
+    results,
+    timestamp: Date.now(),
+  });
+
+  // Limit cache size
+  if (searchCache.size > 200) {
+    const entries = Array.from(searchCache.entries());
+    entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+    for (let i = 0; i < 50; i++) {
+      searchCache.delete(entries[i][0]);
     }
-
-    const data = await response.json();
-    const results: WebSearchResult[] = [];
-
-    // Main abstract (usually from Wikipedia)
-    if (data.Abstract && data.AbstractText) {
-      results.push({
-        title: data.Heading || query,
-        url: data.AbstractURL || '',
-        snippet: data.AbstractText,
-        displayUrl: data.AbstractSource || 'Wikipedia',
-      });
-    }
-
-    // Related topics
-    if (data.RelatedTopics && Array.isArray(data.RelatedTopics)) {
-      for (const topic of data.RelatedTopics.slice(0, 5)) {
-        if (topic.Text && topic.FirstURL) {
-          results.push({
-            title: topic.Text.split(' - ')[0] || topic.Text.substring(0, 50),
-            url: topic.FirstURL,
-            snippet: topic.Text,
-          });
-        }
-        // Handle nested topics (categories)
-        if (topic.Topics && Array.isArray(topic.Topics)) {
-          for (const subTopic of topic.Topics.slice(0, 2)) {
-            if (subTopic.Text && subTopic.FirstURL) {
-              results.push({
-                title: subTopic.Text.split(' - ')[0] || subTopic.Text.substring(0, 50),
-                url: subTopic.FirstURL,
-                snippet: subTopic.Text,
-              });
-            }
-          }
-        }
-      }
-    }
-
-    // Infobox data (structured info)
-    if (data.Infobox && data.Infobox.content) {
-      const infoSnippets = data.Infobox.content
-        .filter((item: { label?: string; value?: string }) => item.label && item.value)
-        .map((item: { label: string; value: string }) => `${item.label}: ${item.value}`)
-        .join('. ');
-
-      if (infoSnippets) {
-        results.push({
-          title: `${query} - Details`,
-          url: data.AbstractURL || '',
-          snippet: infoSnippets,
-        });
-      }
-    }
-
-    return results;
-  } catch (error) {
-    console.warn('[WebSearch] DuckDuckGo search failed:', error);
-    return [];
   }
 }
 
 /**
  * Search using Serper.dev (Google Search API)
  * Free tier: 2,500 queries/month
- * Get API key at: https://serper.dev
+ * CORS-friendly - direct browser access
  */
 async function searchSerper(query: string): Promise<WebSearchResult[]> {
   const apiKey = import.meta.env.VITE_SERPER_API_KEY;
@@ -121,25 +89,55 @@ async function searchSerper(query: string): Promise<WebSearchResult[]> {
   await waitForRateLimit();
 
   try {
-    const response = await fetch('https://google.serper.dev/search', {
-      method: 'POST',
-      headers: {
-        'X-API-KEY': apiKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        q: query,
-        num: 5,
-      }),
-    });
+    const response = await retryWithBackoff(
+      async () => {
+        const res = await fetch('https://google.serper.dev/search', {
+          method: 'POST',
+          headers: {
+            'X-API-KEY': apiKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            q: query,
+            num: 5,
+          }),
+        });
 
-    if (!response.ok) {
-      throw new Error(`Serper API error: ${response.status}`);
-    }
+        if (!res.ok) {
+          const error = new Error(`Serper API error: ${res.status}`);
+          (error as any).status = res.status;
+          if (res.status === 429) {
+            (error as any).isRetryable = true;
+          }
+          throw error;
+        }
+
+        return res;
+      },
+      {
+        ...SEARCH_RETRY_CONFIG,
+        onRetry: (attempt, error) => {
+          console.warn(`[Serper] Retry ${attempt}: ${error.message}`);
+        },
+      }
+    );
 
     const data = await response.json();
 
     const results: WebSearchResult[] = [];
+
+    // Add knowledge graph if available (highest quality)
+    if (data.knowledgeGraph) {
+      const kg = data.knowledgeGraph;
+      if (kg.description) {
+        results.push({
+          title: kg.title || query,
+          url: kg.website || '',
+          snippet: kg.description,
+          displayUrl: 'Knowledge Graph',
+        });
+      }
+    }
 
     // Add organic results
     if (data.organic) {
@@ -149,19 +147,6 @@ async function searchSerper(query: string): Promise<WebSearchResult[]> {
           url: item.link,
           snippet: item.snippet,
           displayUrl: item.displayLink,
-        });
-      }
-    }
-
-    // Add knowledge graph if available
-    if (data.knowledgeGraph) {
-      const kg = data.knowledgeGraph;
-      if (kg.description) {
-        results.unshift({
-          title: kg.title || query,
-          url: kg.website || '',
-          snippet: kg.description,
-          displayUrl: 'Knowledge Graph',
         });
       }
     }
@@ -176,7 +161,7 @@ async function searchSerper(query: string): Promise<WebSearchResult[]> {
 /**
  * Search using Tavily API (AI-optimized search)
  * Free tier: 1,000 queries/month
- * Get API key at: https://tavily.com
+ * CORS-friendly - direct browser access
  */
 async function searchTavily(query: string): Promise<WebSearchResult[]> {
   const apiKey = import.meta.env.VITE_TAVILY_API_KEY;
@@ -188,29 +173,46 @@ async function searchTavily(query: string): Promise<WebSearchResult[]> {
   await waitForRateLimit();
 
   try {
-    const response = await fetch('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        api_key: apiKey,
-        query: query,
-        search_depth: 'basic',
-        max_results: 5,
-        include_answer: true,
-      }),
-    });
+    const response = await retryWithBackoff(
+      async () => {
+        const res = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            api_key: apiKey,
+            query: query,
+            search_depth: 'basic',
+            max_results: 5,
+            include_answer: true,
+          }),
+        });
 
-    if (!response.ok) {
-      throw new Error(`Tavily API error: ${response.status}`);
-    }
+        if (!res.ok) {
+          const error = new Error(`Tavily API error: ${res.status}`);
+          (error as any).status = res.status;
+          if (res.status === 429) {
+            (error as any).isRetryable = true;
+          }
+          throw error;
+        }
+
+        return res;
+      },
+      {
+        ...SEARCH_RETRY_CONFIG,
+        onRetry: (attempt, error) => {
+          console.warn(`[Tavily] Retry ${attempt}: ${error.message}`);
+        },
+      }
+    );
 
     const data = await response.json();
 
     const results: WebSearchResult[] = [];
 
-    // Add AI-generated answer if available
+    // Add AI-generated answer if available (highest quality)
     if (data.answer) {
       results.push({
         title: `About: ${query}`,
@@ -240,7 +242,7 @@ async function searchTavily(query: string): Promise<WebSearchResult[]> {
 
 /**
  * Search using Google Custom Search (if API key available)
- * More comprehensive but requires API key
+ * CORS-friendly - direct browser access
  */
 async function searchGoogle(query: string): Promise<WebSearchResult[]> {
   const apiKey = import.meta.env.VITE_GOOGLE_SEARCH_API_KEY;
@@ -253,13 +255,30 @@ async function searchGoogle(query: string): Promise<WebSearchResult[]> {
   await waitForRateLimit();
 
   try {
-    const response = await fetch(
-      `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${searchEngineId}&q=${encodeURIComponent(query)}&num=5`
-    );
+    const response = await retryWithBackoff(
+      async () => {
+        const res = await fetch(
+          `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${searchEngineId}&q=${encodeURIComponent(query)}&num=5`
+        );
 
-    if (!response.ok) {
-      throw new Error(`Google Search API error: ${response.status}`);
-    }
+        if (!res.ok) {
+          const error = new Error(`Google Search API error: ${res.status}`);
+          (error as any).status = res.status;
+          if (res.status === 429) {
+            (error as any).isRetryable = true;
+          }
+          throw error;
+        }
+
+        return res;
+      },
+      {
+        ...SEARCH_RETRY_CONFIG,
+        onRetry: (attempt, error) => {
+          console.warn(`[Google] Retry ${attempt}: ${error.message}`);
+        },
+      }
+    );
 
     const data = await response.json();
 
@@ -277,7 +296,7 @@ async function searchGoogle(query: string): Promise<WebSearchResult[]> {
 
 /**
  * Use LLM to generate knowledge about a place from its training data
- * This is a fallback when web search fails or returns insufficient results
+ * This is the main fallback when web search APIs are not available or fail
  */
 async function getLLMKnowledge(placeName: string, region: string): Promise<WebSearchResult[]> {
   const llmManager = new LLMProviderManager();
@@ -358,9 +377,10 @@ Return JSON with these exact fields:
 
 /**
  * Main search function - combines multiple sources with smart fallback
- * Priority: Serper → Tavily → DuckDuckGo → Google → LLM Knowledge
+ * Priority: Serper → Tavily → Google → LLM Knowledge
  *
- * Note: Works WITHOUT any API keys using DuckDuckGo + LLM fallback
+ * Note: Works WITHOUT any API keys using LLM fallback
+ * NO CORS proxies needed - all APIs support direct browser access
  */
 export async function searchPlace(
   placeName: string,
@@ -370,10 +390,17 @@ export async function searchPlace(
   const baseQuery = `${placeName} ${region}`;
   const travelQuery = `${baseQuery} travel guide ${additionalTerms.join(' ')}`.trim();
 
+  // Check cache first
+  const cached = getCachedResults(travelQuery);
+  if (cached) {
+    console.log(`[WebSearch] Cache hit for: ${travelQuery}`);
+    return cached;
+  }
+
   console.log(`[WebSearch] Searching for: ${travelQuery}`);
 
   let results: WebSearchResult[] = [];
-  let searchEngine: 'duckduckgo' | 'brave' | 'serper' = 'duckduckgo';
+  let searchEngine: 'duckduckgo' | 'brave' | 'serper' = 'serper';
 
   // Try Serper first (best quality, if API key available)
   results = await searchSerper(travelQuery);
@@ -391,15 +418,6 @@ export async function searchPlace(
     }
   }
 
-  // Try DuckDuckGo (free, no API key needed)
-  if (results.length < 3) {
-    const duckResults = await searchDuckDuckGo(travelQuery);
-    results = [...results, ...duckResults];
-    if (duckResults.length > 0) {
-      console.log(`[WebSearch] Added DuckDuckGo results (${duckResults.length})`);
-    }
-  }
-
   // Try Google Custom Search (if configured)
   if (results.length < 3) {
     const googleResults = await searchGoogle(travelQuery);
@@ -409,7 +427,7 @@ export async function searchPlace(
     }
   }
 
-  // Final fallback: LLM knowledge extraction
+  // Final fallback: LLM knowledge extraction (always available)
   if (results.length < 3) {
     console.log('[WebSearch] Using LLM knowledge fallback');
     const llmResults = await getLLMKnowledge(placeName, region);
@@ -427,12 +445,17 @@ export async function searchPlace(
 
   console.log(`[WebSearch] Found ${results.length} results for ${placeName}`);
 
-  return {
+  const searchResults: PlaceSearchResults = {
     query: travelQuery,
     results: results.slice(0, 10), // Max 10 results
     totalResults: results.length,
     searchEngine,
   };
+
+  // Cache the results
+  cacheResults(travelQuery, searchResults);
+
+  return searchResults;
 }
 
 /**
@@ -446,8 +469,13 @@ export async function searchNearbyFood(
 
   console.log(`[WebSearch] Searching nearby food: ${query}`);
 
-  // Try DuckDuckGo
-  let results = await searchDuckDuckGo(query);
+  // Try search APIs first
+  let results = await searchSerper(query);
+
+  if (results.length < 2) {
+    const tavilyResults = await searchTavily(query);
+    results = [...results, ...tavilyResults];
+  }
 
   // Supplement with LLM if needed
   if (results.length < 2) {
@@ -469,7 +497,13 @@ export async function searchNearbyAttractions(
 
   console.log(`[WebSearch] Searching nearby attractions: ${query}`);
 
-  let results = await searchDuckDuckGo(query);
+  // Try search APIs first
+  let results = await searchSerper(query);
+
+  if (results.length < 2) {
+    const tavilyResults = await searchTavily(query);
+    results = [...results, ...tavilyResults];
+  }
 
   if (results.length < 2) {
     const llmResults = await getLLMKnowledge(`attractions near ${mainPlaceName}`, region);
@@ -477,4 +511,11 @@ export async function searchNearbyAttractions(
   }
 
   return results.slice(0, 5);
+}
+
+/**
+ * Clear search cache
+ */
+export function clearSearchCache(): void {
+  searchCache.clear();
 }

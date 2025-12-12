@@ -171,7 +171,7 @@ export default function SignalCleanse() {
   // Provider display name
   const getProviderDisplayName = (provider: string | null) => {
     switch (provider) {
-      case 'gemini': return 'Gemini AI';
+      case 'openrouter': return 'Grok AI';
       case 'groq': return 'Groq Llama';
       case 'huggingface': return 'HuggingFace';
       case 'offline': return 'Offline Heuristics';

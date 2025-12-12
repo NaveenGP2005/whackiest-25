@@ -10,11 +10,20 @@ import {
   Bell,
   Sparkles,
   ChevronRight,
+  Compass,
 } from 'lucide-react';
 import Button from '../components/ui/Button';
 import { StatsCard } from '../components/ui/Card';
 
 const quickActions = [
+  {
+    icon: Compass,
+    title: 'Trip Planner',
+    subtitle: 'AI-powered planning',
+    color: 'from-amber-500 to-orange-600',
+    path: '/trip-planner',
+    isNew: true,
+  },
   {
     icon: MessageSquare,
     title: 'Signal-Cleanse',
@@ -182,11 +191,18 @@ export default function Dashboard() {
               {quickActions.map((action) => (
                 <motion.div
                   key={action.title}
-                  className="glass-card p-5 cursor-pointer group"
+                  className={`glass-card p-5 cursor-pointer group relative ${
+                    'isNew' in action && action.isNew ? 'ring-2 ring-amber-500/50' : ''
+                  }`}
                   whileHover={{ scale: 1.02, y: -3 }}
                   whileTap={{ scale: 0.98 }}
                   onClick={() => navigate(action.path)}
                 >
+                  {'isNew' in action && action.isNew && (
+                    <div className="absolute -top-2 -right-2 px-2 py-0.5 bg-amber-500 text-xs font-bold text-dark-900 rounded-full">
+                      NEW
+                    </div>
+                  )}
                   <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${action.color} flex items-center justify-center mb-3 group-hover:scale-110 transition-transform`}>
                     <action.icon className="w-6 h-6 text-white" />
                   </div>

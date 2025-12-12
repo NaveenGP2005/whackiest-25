@@ -1,8 +1,26 @@
 // Search API Manager
-import type { ExtractedPlace, EnrichedPlaceData } from '../types';
-import { searchPlace, searchNominatim, getCachedPlace, cachePlace } from './nominatim.service';
+// Uses Photon as primary geocoder with Nominatim fallback (avoids CORS issues)
+import type { ExtractedPlace } from '../types';
+import {
+  searchPlace,
+  searchPlaceNear,
+  searchPhoton,
+  searchNominatim,
+  getCachedPlace,
+  cachePlace,
+  clearPlaceCache,
+} from './nominatim.service';
 
-export { searchNominatim, getCachedPlace, cachePlace, searchPlace };
+// Re-export all geocoding functions
+export {
+  searchPlace,        // Primary: Cache → Photon → Nominatim fallback
+  searchPlaceNear,    // With location bias
+  searchPhoton,       // Direct Photon API (fast, lenient)
+  searchNominatim,    // Direct Nominatim API (may have CORS issues)
+  getCachedPlace,
+  cachePlace,
+  clearPlaceCache,
+};
 
 // Known Indian travel destinations - add "India" or "Goa" suffix for better search
 const GOA_PLACES = new Set([

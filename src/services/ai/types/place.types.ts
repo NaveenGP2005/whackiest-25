@@ -10,7 +10,7 @@ export interface EnrichedPlaceData {
   priceLevel?: number;
   types?: string[];
   website?: string;
-  source: 'nominatim' | 'foursquare' | 'cached';
+  source: 'nominatim' | 'photon' | 'foursquare' | 'cached';
 }
 
 export interface PlaceSearchOptions {
@@ -23,6 +23,6 @@ export interface PlaceSearchOptions {
 
 export interface PlaceSearchResult {
   places: EnrichedPlaceData[];
-  source: 'nominatim' | 'foursquare' | 'cached';
+  source: 'nominatim' | 'photon' | 'foursquare' | 'cached';
   cached: boolean;
 }

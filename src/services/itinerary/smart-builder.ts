@@ -360,6 +360,374 @@ function getClusterCentroid(places: PlaceKnowledge[]): Coords {
 }
 
 /**
+ * REALISTIC ITINERARY DISTRIBUTION
+ *
+ * This algorithm considers REAL constraints that travelers face:
+ * 1. Total available hours per day (8 AM - 9 PM = 13 hours)
+ * 2. Activity duration at each place (from research)
+ * 3. Travel time between places (distance / average speed)
+ * 4. Buffer time for meals, rest, and unexpected delays
+ * 5. Place types and optimal visiting times
+ */
+
+// Travel speed assumptions (km/h)
+const TRAVEL_SPEEDS = {
+  walking: 5,
+  autoRickshaw: 25,
+  car: 40,
+  bike: 30,
+};
+
+// Day time budget (in minutes)
+const DAY_START_MINUTES = 8 * 60;        // 8:00 AM
+const DAY_END_MINUTES = 21 * 60;         // 9:00 PM
+const TOTAL_DAY_MINUTES = DAY_END_MINUTES - DAY_START_MINUTES; // 780 minutes = 13 hours
+
+// Buffer times (in minutes)
+const LUNCH_BUFFER = 60;         // 1 hour for lunch
+const DINNER_BUFFER = 75;        // 1.25 hours for dinner
+const REST_BUFFER = 30;          // 30 min buffer between activities
+const DAILY_BUFFER = LUNCH_BUFFER + DINNER_BUFFER + REST_BUFFER; // 165 min
+
+// Effective time for activities + travel per day
+const EFFECTIVE_DAY_MINUTES = TOTAL_DAY_MINUTES - DAILY_BUFFER; // ~615 min = 10.25 hours
+
+/**
+ * Calculate travel time between two places in minutes
+ */
+function calculateTravelTime(from: PlaceKnowledge, to: PlaceKnowledge, mode: keyof typeof TRAVEL_SPEEDS = 'autoRickshaw'): number {
+  const distance = haversineDistance(
+    from.coordinates.lat,
+    from.coordinates.lng,
+    to.coordinates.lat,
+    to.coordinates.lng
+  );
+  const speed = TRAVEL_SPEEDS[mode];
+  const timeHours = distance / speed;
+  return Math.ceil(timeHours * 60); // Convert to minutes, round up
+}
+
+/**
+ * Calculate total time needed for a set of places (activities + travel)
+ */
+function calculateDayTimeRequired(places: PlaceKnowledge[]): {
+  totalMinutes: number;
+  activityMinutes: number;
+  travelMinutes: number;
+  breakdown: string;
+} {
+  if (places.length === 0) {
+    return { totalMinutes: 0, activityMinutes: 0, travelMinutes: 0, breakdown: 'Empty day' };
+  }
+
+  let activityMinutes = 0;
+  let travelMinutes = 0;
+
+  // Sum up activity durations
+  for (const place of places) {
+    activityMinutes += place.duration || 90; // Default 90 min if unknown
+  }
+
+  // Calculate travel time between places (in optimal order)
+  if (places.length > 1) {
+    // Simple nearest-neighbor ordering for estimation
+    const ordered = [...places];
+    for (let i = 0; i < ordered.length - 1; i++) {
+      travelMinutes += calculateTravelTime(ordered[i], ordered[i + 1]);
+    }
+  }
+
+  const totalMinutes = activityMinutes + travelMinutes;
+  const breakdown = `${Math.round(activityMinutes / 60)}h activities + ${Math.round(travelMinutes / 60)}h travel`;
+
+  return { totalMinutes, activityMinutes, travelMinutes, breakdown };
+}
+
+/**
+ * REALISTIC distribution of places across days
+ *
+ * Strategy:
+ * 1. Calculate time required for each place (duration + avg travel)
+ * 2. Use bin-packing algorithm to fit places into day "bins"
+ * 3. Ensure geographic coherence (nearby places same day)
+ * 4. Respect daily time budget
+ */
+function distributeByGeography(places: PlaceKnowledge[], numDays: number): PlaceKnowledge[][] {
+  if (places.length === 0) return Array(numDays).fill([]).map(() => []);
+
+  console.log(`[SmartBuilder] Planning ${places.length} places across ${numDays} days`);
+  console.log(`[SmartBuilder] Daily time budget: ${Math.round(EFFECTIVE_DAY_MINUTES / 60)} hours (after meals & rest)`);
+
+  // Step 1: Build distance/time matrix
+  const n = places.length;
+  const travelTimeMatrix: number[][] = [];
+
+  for (let i = 0; i < n; i++) {
+    travelTimeMatrix[i] = [];
+    for (let j = 0; j < n; j++) {
+      if (i === j) {
+        travelTimeMatrix[i][j] = 0;
+      } else {
+        travelTimeMatrix[i][j] = calculateTravelTime(places[i], places[j]);
+      }
+    }
+  }
+
+  // Step 2: Calculate "time weight" for each place (duration + avg travel to others)
+  const placeTimeWeights: { place: PlaceKnowledge; idx: number; weight: number; avgTravel: number }[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const duration = places[i].duration || 90;
+    const avgTravel = travelTimeMatrix[i].reduce((a, b) => a + b, 0) / (n - 1);
+    const weight = duration + avgTravel / 2; // Activity time + half of average travel
+
+    placeTimeWeights.push({
+      place: places[i],
+      idx: i,
+      weight,
+      avgTravel,
+    });
+  }
+
+  // Step 3: Sort by geographic clusters using distance-based grouping
+  // Group places that are within 30 min travel of each other
+  const CLUSTER_THRESHOLD = 30; // 30 min travel time
+  const geoClusters: number[][] = [];
+  const clusterAssigned = new Set<number>();
+
+  for (let i = 0; i < n; i++) {
+    if (clusterAssigned.has(i)) continue;
+
+    const cluster: number[] = [i];
+    clusterAssigned.add(i);
+
+    // Find all places within threshold
+    for (let j = 0; j < n; j++) {
+      if (clusterAssigned.has(j)) continue;
+      if (travelTimeMatrix[i][j] <= CLUSTER_THRESHOLD) {
+        cluster.push(j);
+        clusterAssigned.add(j);
+      }
+    }
+
+    geoClusters.push(cluster);
+  }
+
+  console.log(`[SmartBuilder] Found ${geoClusters.length} geographic clusters`);
+
+  // Step 4: Assign clusters to days using time-aware bin packing
+  const dayBins: PlaceKnowledge[][] = Array(numDays).fill(null).map(() => []);
+  const dayTimeUsed: number[] = Array(numDays).fill(0);
+
+  // Sort clusters by total time required (largest first - First Fit Decreasing)
+  const clusterTimes = geoClusters.map(cluster => ({
+    cluster,
+    places: cluster.map(i => places[i]),
+    totalTime: cluster.reduce((sum, i) => sum + (places[i].duration || 90), 0) +
+               (cluster.length > 1 ? cluster.slice(1).reduce((sum, i, idx) =>
+                 sum + travelTimeMatrix[cluster[idx]][i], 0) : 0),
+  }));
+
+  clusterTimes.sort((a, b) => b.totalTime - a.totalTime);
+
+  // Assign each cluster to the day with most available time that can fit it
+  for (const { cluster, places: clusterPlaces, totalTime } of clusterTimes) {
+    // Find the best day for this cluster
+    let bestDay = -1;
+    let bestRemainingTime = -1;
+
+    for (let d = 0; d < numDays; d++) {
+      const remainingTime = EFFECTIVE_DAY_MINUTES - dayTimeUsed[d];
+
+      // Can this cluster fit in this day?
+      // Also consider travel from existing places in the day
+      let additionalTravel = 0;
+      if (dayBins[d].length > 0) {
+        // Estimate travel from last place in day to first place in cluster
+        const lastPlaceIdx = places.indexOf(dayBins[d][dayBins[d].length - 1]);
+        const firstClusterIdx = cluster[0];
+        additionalTravel = travelTimeMatrix[lastPlaceIdx][firstClusterIdx];
+      }
+
+      const totalNeeded = totalTime + additionalTravel;
+
+      if (totalNeeded <= remainingTime && remainingTime > bestRemainingTime) {
+        bestDay = d;
+        bestRemainingTime = remainingTime;
+      }
+    }
+
+    // If no day can fit the entire cluster, find day with most space
+    if (bestDay === -1) {
+      bestDay = dayTimeUsed.indexOf(Math.min(...dayTimeUsed));
+    }
+
+    // Add cluster places to the selected day
+    for (const idx of cluster) {
+      dayBins[bestDay].push(places[idx]);
+      dayTimeUsed[bestDay] += (places[idx].duration || 90);
+    }
+
+    // Add travel time estimate
+    if (cluster.length > 1) {
+      const travelTime = cluster.slice(1).reduce((sum, i, idx) =>
+        sum + travelTimeMatrix[cluster[idx]][i], 0);
+      dayTimeUsed[bestDay] += travelTime;
+    }
+  }
+
+  // Step 5: Rebalance if any day is way overloaded
+  const MAX_OVERLOAD = 120; // Allow up to 2 hours overload
+
+  for (let iteration = 0; iteration < 10; iteration++) {
+    // Find most overloaded and most underloaded days
+    let maxDayIdx = 0, minDayIdx = 0;
+    let maxTime = dayTimeUsed[0], minTime = dayTimeUsed[0];
+
+    for (let d = 1; d < numDays; d++) {
+      if (dayTimeUsed[d] > maxTime) {
+        maxTime = dayTimeUsed[d];
+        maxDayIdx = d;
+      }
+      if (dayTimeUsed[d] < minTime) {
+        minTime = dayTimeUsed[d];
+        minDayIdx = d;
+      }
+    }
+
+    // If max day is not too overloaded, stop
+    if (maxTime <= EFFECTIVE_DAY_MINUTES + MAX_OVERLOAD) break;
+
+    // Try to move a place from max day to min day
+    const sourceDay = dayBins[maxDayIdx];
+    const targetDay = dayBins[minDayIdx];
+
+    if (sourceDay.length <= 1) break; // Can't move from a day with 1 place
+
+    // Find the place that's closest to target day's centroid
+    const targetCentroid = targetDay.length > 0
+      ? getClusterCentroid(targetDay)
+      : getClusterCentroid(sourceDay);
+
+    let bestMoveIdx = -1;
+    let bestDist = Infinity;
+    let bestDuration = 0;
+
+    for (let i = 0; i < sourceDay.length; i++) {
+      const place = sourceDay[i];
+      const dist = haversineDistance(
+        targetCentroid.lat,
+        targetCentroid.lng,
+        place.coordinates.lat,
+        place.coordinates.lng
+      );
+      const duration = place.duration || 90;
+
+      // Only move if it helps (place duration fits in target day)
+      if (dayTimeUsed[minDayIdx] + duration <= EFFECTIVE_DAY_MINUTES && dist < bestDist) {
+        bestDist = dist;
+        bestMoveIdx = i;
+        bestDuration = duration;
+      }
+    }
+
+    if (bestMoveIdx === -1) break;
+
+    // Move the place
+    const placeToMove = sourceDay.splice(bestMoveIdx, 1)[0];
+    targetDay.push(placeToMove);
+    dayTimeUsed[maxDayIdx] -= bestDuration;
+    dayTimeUsed[minDayIdx] += bestDuration;
+  }
+
+  // Step 6: Order places within each day by proximity (TSP-like)
+  for (let d = 0; d < numDays; d++) {
+    if (dayBins[d].length > 1) {
+      dayBins[d] = orderByProximity(dayBins[d]);
+    }
+  }
+
+  // Log final distribution
+  console.log(`[SmartBuilder] Final realistic distribution:`);
+  for (let d = 0; d < numDays; d++) {
+    const timeInfo = calculateDayTimeRequired(dayBins[d]);
+    const hours = Math.round(timeInfo.totalMinutes / 60 * 10) / 10;
+    const withinBudget = timeInfo.totalMinutes <= EFFECTIVE_DAY_MINUTES;
+    const status = withinBudget ? '✓' : '⚠️ tight';
+    console.log(`  Day ${d + 1}: ${dayBins[d].length} places, ~${hours}h (${timeInfo.breakdown}) ${status}`);
+  }
+
+  return dayBins;
+}
+
+/**
+ * Order places by proximity (nearest neighbor heuristic)
+ * This creates a logical route that minimizes backtracking
+ */
+function orderByProximity(places: PlaceKnowledge[]): PlaceKnowledge[] {
+  if (places.length <= 1) return places;
+
+  const ordered: PlaceKnowledge[] = [];
+  const remaining = new Set(places);
+
+  // Start with the place that should be visited earliest (morning places first)
+  let current = places.reduce((best, place) => {
+    const bestTime = getOptimalTimeOfDay(best);
+    const placeTime = getOptimalTimeOfDay(place);
+    const timeOrder = { morning: 0, afternoon: 1, evening: 2, night: 3, flexible: 1.5 };
+    return timeOrder[placeTime] < timeOrder[bestTime] ? place : best;
+  });
+
+  ordered.push(current);
+  remaining.delete(current);
+
+  // Greedily add nearest unvisited place
+  while (remaining.size > 0) {
+    let nearest: PlaceKnowledge | null = null;
+    let minDist = Infinity;
+
+    for (const place of remaining) {
+      const dist = haversineDistance(
+        current.coordinates.lat,
+        current.coordinates.lng,
+        place.coordinates.lat,
+        place.coordinates.lng
+      );
+      if (dist < minDist) {
+        minDist = dist;
+        nearest = place;
+      }
+    }
+
+    if (!nearest) break;
+
+    ordered.push(nearest);
+    remaining.delete(nearest);
+    current = nearest;
+  }
+
+  return ordered;
+}
+
+/**
+ * Calculate total travel distance within a cluster (visiting in order)
+ */
+function calculateClusterTotalDistance(places: PlaceKnowledge[]): number {
+  if (places.length <= 1) return 0;
+
+  let total = 0;
+  for (let i = 1; i < places.length; i++) {
+    total += haversineDistance(
+      places[i - 1].coordinates.lat,
+      places[i - 1].coordinates.lng,
+      places[i].coordinates.lat,
+      places[i].coordinates.lng
+    );
+  }
+  return total;
+}
+
+/**
  * Build a day schedule from places, respecting times and inserting meals
  */
 function buildDaySchedule(
@@ -836,8 +1204,12 @@ export async function generateSmartItinerary(
   // Filter out accommodation from visit planning
   const visitablePlaces = knowledge.filter(p => p.type !== 'accommodation');
 
-  // Cluster places by proximity for each day
-  const clusters = clusterByProximity(visitablePlaces, numDays);
+  // Distribute places across days using geography-aware algorithm
+  // This ensures:
+  // 1. Places that are close together are on the same day
+  // 2. Days are balanced (no day with 6 places while another has 1)
+  // 3. Travel distance within each day is minimized
+  const clusters = distributeByGeography(visitablePlaces, numDays);
 
   // Build each day's schedule
   const days: DayItinerary[] = [];
