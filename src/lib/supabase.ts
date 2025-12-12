@@ -41,6 +41,7 @@ export interface DbMember {
   device_id: string;
   name: string;
   avatar: string;
+  email: string | null;  // Email for SOS notifications
   joined_at: string;
   is_active: boolean;
 }

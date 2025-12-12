@@ -18,8 +18,9 @@ import QRCodeDisplay from './QRCodeDisplay';
 interface GroupSetupModalProps {
   isOpen: boolean;
   initialJoinCode?: string | null;
-  onCreateGroup: (groupName: string, userName: string) => Promise<{ groupCode: string; groupId: string; memberId: string } | null>;
-  onJoinGroup: (code: string, userName: string) => Promise<{ groupId: string; memberId: string; groupName: string } | null>;
+  userEmail?: string | null;  // User email for SOS notifications
+  onCreateGroup: (groupName: string, userName: string, userEmail?: string) => Promise<{ groupCode: string; groupId: string; memberId: string } | null>;
+  onJoinGroup: (code: string, userName: string, userEmail?: string) => Promise<{ groupId: string; memberId: string; groupName: string } | null>;
   onClose: () => void;
   onSuccess: () => void;
 }
@@ -29,6 +30,7 @@ type ModalStep = 'choose' | 'create' | 'join' | 'scan' | 'created';
 export default function GroupSetupModal({
   isOpen,
   initialJoinCode,
+  userEmail,
   onCreateGroup,
   onJoinGroup,
   onClose,
@@ -81,7 +83,7 @@ export default function GroupSetupModal({
     setError('');
 
     try {
-      const result = await onCreateGroup(groupName.trim(), userName.trim());
+      const result = await onCreateGroup(groupName.trim(), userName.trim(), userEmail || undefined);
 
       if (result) {
         setCreatedGroup({ code: result.groupCode, name: groupName });
@@ -112,7 +114,7 @@ export default function GroupSetupModal({
     setError('');
 
     try {
-      const result = await onJoinGroup(codeToUse.toUpperCase(), userName.trim());
+      const result = await onJoinGroup(codeToUse.toUpperCase(), userName.trim(), userEmail || undefined);
 
       if (result) {
         onSuccess();

@@ -33,6 +33,7 @@ import {
   SafetyBriefingPanel,
 } from '../components/safety';
 import { useSafetyStore } from '../stores/safety.store';
+import { useAuthStore } from '../stores/auth.store';
 import { useTripSafetyContext } from '../hooks/useTripSafetyContext';
 import {
   startLiveMapSimulation,
@@ -159,6 +160,9 @@ export default function SafetySentinel() {
 
   // Trip context - integrates with Trip Planner and Itinerary
   const tripContext = useTripSafetyContext();
+
+  // Auth context - get user email for SOS notifications
+  const { user } = useAuthStore();
 
   // Store state
   const {
@@ -451,9 +455,9 @@ export default function SafetySentinel() {
   };
 
   // Live tracking handlers
-  const handleCreateGroup = async (name: string, userName: string) => {
-    console.log('[SafetySentinel] Creating group:', name, 'user:', userName);
-    const result = await createGroup(name, userName);
+  const handleCreateGroup = async (name: string, userName: string, userEmail?: string) => {
+    console.log('[SafetySentinel] Creating group:', name, 'user:', userName, 'email:', userEmail);
+    const result = await createGroup(name, userName, userEmail);
     if (result) {
       console.log('[SafetySentinel] Group created successfully:', result.groupCode);
       setGroupSession({
@@ -468,9 +472,9 @@ export default function SafetySentinel() {
     return result;
   };
 
-  const handleJoinGroup = async (code: string, userName: string) => {
-    console.log('[SafetySentinel] Joining group:', code, 'user:', userName);
-    const result = await joinGroup(code, userName);
+  const handleJoinGroup = async (code: string, userName: string, userEmail?: string) => {
+    console.log('[SafetySentinel] Joining group:', code, 'user:', userName, 'email:', userEmail);
+    const result = await joinGroup(code, userName, userEmail);
     if (result) {
       console.log('[SafetySentinel] Joined group successfully:', result.groupName);
       setGroupSession({
@@ -1201,6 +1205,7 @@ export default function SafetySentinel() {
       <GroupSetupModal
         isOpen={showGroupSetupModal}
         initialJoinCode={initialJoinCode}
+        userEmail={user?.email}
         onCreateGroup={handleCreateGroup}
         onJoinGroup={handleJoinGroup}
         onClose={() => {

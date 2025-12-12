@@ -6,6 +6,14 @@ import { supabase, isSupabaseConfigured } from '../../lib/supabase';
 import type { DbLocation, DbMember } from '../../lib/supabase';
 import type { LocationFix } from './location-tracker';
 import { haversineDistance } from './geo-utils';
+import {
+  checkGeofenceBreach,
+  shouldNotify,
+  markNotified,
+  clearBreachStatus,
+  triggerSOSAlert,
+  SOS_CONFIG,
+} from './sos-service';
 
 // ==================== Constants ====================
 
@@ -19,6 +27,7 @@ export interface RealtimeMember {
   id: string;
   name: string;
   avatar: string;
+  email: string | null;  // Email for SOS notifications
   location: { lat: number; lng: number } | null;
   accuracy: number;
   battery: number;
@@ -100,7 +109,8 @@ export function isValidGroupCode(code: string): boolean {
  */
 export async function createGroup(
   groupName: string,
-  userName: string
+  userName: string,
+  userEmail?: string  // Email for SOS notifications
 ): Promise<CreateGroupResult | null> {
   if (!isSupabaseConfigured() || !supabase) {
     console.error('Supabase not configured');
@@ -140,6 +150,7 @@ export async function createGroup(
         device_id: deviceId,
         name: userName,
         avatar: avatar,
+        email: userEmail || null,  // Store email for SOS
         is_active: true,
       })
       .select()
@@ -168,7 +179,8 @@ export async function createGroup(
  */
 export async function joinGroup(
   groupCode: string,
-  userName: string
+  userName: string,
+  userEmail?: string  // Email for SOS notifications
 ): Promise<JoinGroupResult | null> {
   if (!isSupabaseConfigured() || !supabase) {
     console.error('Supabase not configured');
@@ -220,6 +232,7 @@ export async function joinGroup(
         device_id: deviceId,
         name: userName,
         avatar: avatar,
+        email: userEmail || null,  // Store email for SOS
         is_active: true,
       })
       .select()
@@ -311,6 +324,7 @@ export async function startRealtimeSession(
           id: m.id,
           name: m.name,
           avatar: m.avatar,
+          email: m.email || null,  // Email for SOS notifications
           location: null,
           accuracy: 100,
           battery: 100,
@@ -552,6 +566,44 @@ function handleLocationUpdate(loc: DbLocation): void {
     // Recalculate status
     updateMemberStatus(updatedMember);
     emitMembersUpdate();
+
+    // Check for geofence breach and trigger SOS if needed
+    checkAndTriggerSOS(updatedMember);
+  }
+}
+
+/**
+ * Check geofence breach and trigger SOS alert if needed
+ */
+async function checkAndTriggerSOS(member: RealtimeMember): Promise<void> {
+  if (!currentSession || !SOS_CONFIG.ENABLED) return;
+
+  const allMembers = Array.from(currentSession.members.values());
+
+  // Check if this member has breached the geofence
+  const isBreach = checkGeofenceBreach(member, allMembers);
+
+  if (isBreach) {
+    console.log(`[SOS] Member ${member.name} is ${member.distanceFromGroup.toFixed(1)}m from group (threshold: ${SOS_CONFIG.GEOFENCE_RADIUS_METERS}m)`);
+
+    // Only notify if not already notified (with cooldown)
+    if (shouldNotify(member.id)) {
+      console.log(`[SOS] Triggering SOS alert for ${member.name}`);
+      markNotified(member.id);
+
+      const success = await triggerSOSAlert(
+        member,
+        allMembers,
+        currentSession.groupName
+      );
+
+      if (success) {
+        console.log(`[SOS] Alert sent successfully for ${member.name}`);
+      }
+    }
+  } else {
+    // Member is back in safe zone - clear breach status
+    clearBreachStatus(member.id);
   }
 }
 
@@ -566,6 +618,7 @@ function handleMemberJoin(m: DbMember): void {
       id: m.id,
       name: m.name,
       avatar: m.avatar,
+      email: m.email || null,  // Email for SOS notifications
       location: null,
       accuracy: 100,
       battery: 100,
